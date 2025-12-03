@@ -1,0 +1,5 @@
+{
+  "name": "Bedrock Manager",
+  "description": "A web-based control panel for managing a Minecraft Bedrock Dedicated Server on Linux.",
+  "requestFramePermissions": []
+}

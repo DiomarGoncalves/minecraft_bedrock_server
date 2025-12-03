@@ -1,0 +1,45 @@
+export enum ServerStatus {
+  OFFLINE = 'OFFLINE',
+  STARTING = 'STARTING',
+  ONLINE = 'ONLINE',
+  STOPPING = 'STOPPING'
+}
+
+export interface ConsoleMessage {
+  type: 'stdout' | 'stderr' | 'system';
+  message: string;
+  timestamp: string;
+}
+
+export interface ServerConfigItem {
+  key: string;
+  value: string;
+  description?: string;
+}
+
+export interface AddonFile {
+  id: string;
+  name: string;
+  description?: string;
+  type: 'behavior' | 'resource';
+  path: string;
+}
+
+export interface Manifest {
+  header: {
+    name: string;
+    description: string;
+    uuid: string;
+    version: number[];
+  };
+}
+
+export interface ToastData {
+  id: string;
+  type: 'success' | 'error' | 'info';
+  message: string;
+}
+
+export interface CommonProps {
+  showToast: (type: 'success' | 'error' | 'info', message: string) => void;
+}

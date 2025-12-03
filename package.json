@@ -1,0 +1,18 @@
+{
+  "name": "bedrock-panel-root",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "install:all": "yarn install && cd backend && yarn install && cd ../frontend && yarn install",
+    "dev": "concurrently \"cd backend && node src/index.js\" \"cd frontend && vite\"",
+    "build": "cd frontend && vite build && cd ../backend && tsc",
+    "start": "concurrently \"cd backend && node src/index.js\" \"cd frontend && vite preview\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ]
+}

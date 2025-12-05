@@ -3,18 +3,19 @@ import type { RequestHandler } from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, exec, ChildProcess } from 'child_process';
 import fs from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, createReadStream, createWriteStream } from 'fs';
 import path from 'path';
 import multer from 'multer';
 import AdmZip from 'adm-zip';
 
 // --- Configuration ---
 const PORT = 3001;
-// Use absolute path for server directory to ensure LD_LIBRARY_PATH works
-const SERVER_DIR = path.resolve('mc-server'); 
-const PLAYIT_BIN = process.env.PLAYIT_BIN || './playit'; 
+const SERVER_DIR = path.resolve('mc-server');
+const WORLDS_DIR = path.join(SERVER_DIR, 'worlds');
+const BACKUPS_DIR = path.resolve('backups');
+const PLAYIT_BIN = process.env.PLAYIT_BIN || './playit';
 
 const app = express();
 const server = createServer(app);
@@ -23,472 +24,641 @@ const wss = new WebSocketServer({ server, path: '/ws/console' });
 app.use(cors());
 app.use(express.json());
 
-// --- Types ---
+// --- Types & Interfaces ---
 interface MulterRequest extends express.Request {
   file?: Express.Multer.File;
 }
 
-// --- Helpers: Line Buffer ---
-// Ensures we don't emit partial lines from stdout chunks
+// --- Helpers ---
 class LineBuffer {
   private buffer: string = '';
-
   process(chunk: string, callback: (line: string) => void) {
     this.buffer += chunk;
     const lines = this.buffer.split('\n');
-    // The last element is either an empty string (if chunk ended with \n) 
-    // or an incomplete line. We keep it in the buffer.
     this.buffer = lines.pop() || '';
-
     for (const line of lines) {
-      if (line.trim()) callback(line);
+      if (line.trim()) callback(line); // Changed: allow empty lines if strict needed, but trim is usually safer for UI
     }
   }
 }
 
-// --- Global State ---
-let bedrockProcess: ChildProcess | null = null;
-let serverStatus = 'OFFLINE';
-
-// --- WebSocket Helper ---
 const broadcast = (data: any) => {
   const message = JSON.stringify(data);
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
-    }
+    if (client.readyState === WebSocket.OPEN) client.send(message);
   });
 };
 
 const sendToConsole = (msg: string, type: 'stdout' | 'stderr' | 'system' = 'system') => {
   broadcast({
     type: 'console',
-    data: {
-      type,
-      message: msg, // Send raw message, frontend handles formatting
-      timestamp: new Date().toISOString()
-    }
+    data: { type, message: msg, timestamp: new Date().toISOString() }
   });
 };
 
 // --- Initialization ---
-const initServerEnvironment = async () => {
+const initEnvironment = async () => {
     try {
-        if (!existsSync(SERVER_DIR)) {
-            await fs.mkdir(SERVER_DIR, { recursive: true });
-            console.log(`Created server directory at: ${SERVER_DIR}`);
-        }
-
-        // Force development folders
+        await fs.mkdir(SERVER_DIR, { recursive: true });
+        await fs.mkdir(WORLDS_DIR, { recursive: true });
+        await fs.mkdir(BACKUPS_DIR, { recursive: true });
         await fs.mkdir(path.join(SERVER_DIR, 'development_behavior_packs'), { recursive: true });
         await fs.mkdir(path.join(SERVER_DIR, 'development_resource_packs'), { recursive: true });
         
-        // Standard folders
-        await fs.mkdir(path.join(SERVER_DIR, 'behavior_packs'), { recursive: true });
-        await fs.mkdir(path.join(SERVER_DIR, 'resource_packs'), { recursive: true });
-
+        // Ensure default properties
         const propFile = path.join(SERVER_DIR, 'server.properties');
         if (!existsSync(propFile)) {
-            console.log('Creating default server.properties');
-            const defaultProps = `server-name=Bedrock Server
-gamemode=survival
-difficulty=easy
-allow-cheats=false
-max-players=10
-online-mode=true
-white-list=false
-server-port=19132
-server-portv6=19133
-view-distance=32
-tick-distance=4
-player-idle-timeout=30
-max-threads=8
-level-name=Bedrock level
-level-seed=
-default-player-permission-level=member
-texturepack-required=false
-content-log-file-enabled=true
-compression-threshold=1
-server-authoritative-movement=server-auth
-player-movement-score-threshold=20
-player-movement-action-direction-threshold=0.85
-player-movement-distance-threshold=0.3
-player-movement-duration-threshold-in-ms=500
-correct-player-movement=false
-server-authoritative-block-breaking=false`;
-            await fs.writeFile(propFile, defaultProps);
+            await fs.writeFile(propFile, 'server-name=Bedrock Server\nlevel-name=Bedrock level\ngamemode=survival\ndifficulty=easy\nallow-cheats=false\nmax-players=10\nonline-mode=true\nserver-port=19132\nserver-portv6=19133\ncontent-log-file-enabled=true\n');
         }
-    } catch (error) {
-        console.error('Failed to initialize server environment:', error);
+    } catch (e) {
+        console.error("Init Error:", e);
     }
 };
+initEnvironment();
 
-initServerEnvironment();
+// ==========================================
+// SERVICE: BEDROCK SERVER
+// ==========================================
+class BedrockService {
+    private process: ChildProcess | null = null;
+    status = 'OFFLINE';
 
-// --- PlayIt Service ---
-class PlayItService {
-  private process: ChildProcess | null = null;
-  private publicAddress: string | null = null;
-  private logs: string[] = [];
-  private buffer = new LineBuffer();
+    async start() {
+        if (this.process) return false;
 
-  start() {
-    if (this.process) return false;
-
-    // Determine executable path (check root or server dir)
-    let execPath = path.resolve(PLAYIT_BIN);
-    if (!existsSync(execPath)) {
-        // Fallback to trying inside mc-server if not in root
-        execPath = path.join(SERVER_DIR, 'playit');
-    }
-    
-    // Fallback: try just "playit" command if installed globally
-    if (!existsSync(execPath)) execPath = 'playit';
-
-    try {
-      this.process = spawn(execPath, [], {
-        cwd: SERVER_DIR, // Run inside server dir so it finds config/secret
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-
-      this.process.stdout?.setEncoding('utf8');
-      this.process.stderr?.setEncoding('utf8');
-
-      const handleLog = (line: string) => {
-        this.logs.push(line);
-        if (this.logs.length > 50) this.logs.shift();
-        
-        // Try parsing address: "examples.playit.gg:12345"
-        // Regex looks for common playit domains or generic format
-        const match = line.match(/((?:[a-z0-9-]+\.)+playit\.gg(?::\d+)?)/i);
-        if (match) {
-          this.publicAddress = match[1];
+        const execPath = path.join(SERVER_DIR, 'bedrock_server');
+        if (!existsSync(execPath)) {
+            sendToConsole(`Error: bedrock_server not found in ${SERVER_DIR}`, 'stderr');
+            return false;
         }
-      };
 
-      this.process.stdout?.on('data', (chunk) => this.buffer.process(chunk, handleLog));
-      this.process.stderr?.on('data', (chunk) => this.buffer.process(chunk, handleLog));
+        await fs.chmod(execPath, '755');
+        this.status = 'STARTING';
+        broadcast({ type: 'status', status: this.status });
+        sendToConsole('Starting Server...', 'system');
 
-      this.process.on('close', () => {
-        this.process = null;
-        this.publicAddress = null;
-        this.logs.push('--- PlayIt Process Stopped ---');
-      });
+        const stdoutBuf = new LineBuffer();
+        const stderrBuf = new LineBuffer();
 
-      this.logs.push('--- PlayIt Process Started ---');
-      return true;
+        // LD_LIBRARY_PATH needs absolute path
+        this.process = spawn('./bedrock_server', [], {
+            cwd: SERVER_DIR,
+            env: { ...process.env, LD_LIBRARY_PATH: SERVER_DIR },
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
 
-    } catch (e: any) {
-      this.logs.push(`Failed to start playit: ${e.message}`);
-      return false;
+        this.process.stdout?.setEncoding('utf8');
+        this.process.stdout?.on('data', c => stdoutBuf.process(c.toString(), l => {
+            sendToConsole(l, 'stdout');
+            if (l.includes('Server started')) {
+                this.status = 'ONLINE';
+                broadcast({ type: 'status', status: this.status });
+            }
+        }));
+
+        this.process.stderr?.setEncoding('utf8');
+        this.process.stderr?.on('data', c => stderrBuf.process(c.toString(), l => sendToConsole(l, 'stderr')));
+
+        this.process.on('close', (code) => {
+            sendToConsole(`Server exited with code ${code}`, 'system');
+            this.process = null;
+            this.status = 'OFFLINE';
+            broadcast({ type: 'status', status: this.status });
+        });
+
+        return true;
     }
-  }
 
-  stop() {
-    if (this.process) {
-      this.process.kill('SIGINT');
-      this.process = null;
-      return true;
+    stop() {
+        if (!this.process) return false;
+        this.status = 'STOPPING';
+        broadcast({ type: 'status', status: this.status });
+        if (this.process.stdin) this.process.stdin.write('stop\n');
+        else this.process.kill('SIGTERM');
+        return true;
     }
-    return false;
-  }
 
-  getStatus() {
-    return {
-      running: !!this.process,
-      publicAddress: this.publicAddress,
-      logs: this.logs
-    };
-  }
+    async restart() {
+        if (this.process) {
+            this.stop();
+            // Wait for shutdown
+            for (let i = 0; i < 20; i++) {
+                if (!this.process) break;
+                await new Promise(r => setTimeout(r, 500));
+            }
+        }
+        return this.start();
+    }
+
+    sendCommand(cmd: string) {
+        if (this.process && this.process.stdin) {
+            this.process.stdin.write(cmd + '\n');
+            sendToConsole(`> ${cmd}`, 'stdout');
+        }
+    }
 }
+const bedrockService = new BedrockService();
 
-const playitService = new PlayItService();
+// ==========================================
+// SERVICE: PLAYIT (TUNNEL)
+// ==========================================
+class PlayItService {
+    private process: ChildProcess | null = null;
+    private publicAddress: string | null = null;
+    private logs: string[] = [];
+    private buffer = new LineBuffer();
+    private _isInstalled: boolean = false;
 
+    constructor() { this.checkInstall(); }
 
-// --- Bedrock Process Management ---
-
-const startServer = async () => {
-  if (bedrockProcess) return false;
-
-  try {
-    const execPath = path.join(SERVER_DIR, 'bedrock_server');
-
-    if (!existsSync(execPath)) {
-        sendToConsole(`Error: 'bedrock_server' executable not found at ${execPath}.`, 'stderr');
-        sendToConsole(`Please upload the Bedrock Server Linux binaries to this folder.`, 'stderr');
-        return false;
+    async checkInstall() {
+        return new Promise<void>(resolve => {
+            exec('which playit', (err) => {
+                if (!err) this._isInstalled = true;
+                else if (existsSync(path.resolve(PLAYIT_BIN))) this._isInstalled = true;
+                else this._isInstalled = false;
+                resolve();
+            });
+        });
     }
 
-    // Ensure permission
-    await fs.chmod(execPath, '755');
-
-    serverStatus = 'STARTING';
-    broadcast({ type: 'status', status: serverStatus });
-    sendToConsole('Starting Bedrock Server...', 'system');
-
-    const stdoutBuffer = new LineBuffer();
-    const stderrBuffer = new LineBuffer();
-
-    // Use absolute path for LD_LIBRARY_PATH
-    const libraryPath = SERVER_DIR;
-
-    bedrockProcess = spawn('./bedrock_server', [], {
-        cwd: SERVER_DIR,
-        // Crucial for Linux: Point LD_LIBRARY_PATH to the absolute server dir
-        env: { ...process.env, LD_LIBRARY_PATH: libraryPath },
-        shell: false, 
-        stdio: ['pipe', 'pipe', 'pipe'] 
-    });
-
-    if (bedrockProcess.stdout) {
-        bedrockProcess.stdout.setEncoding('utf8');
-        bedrockProcess.stdout.on('data', (chunk) => {
-            stdoutBuffer.process(chunk.toString(), (line) => {
-                sendToConsole(line, 'stdout');
-                if (line.includes('Server started')) {
-                    serverStatus = 'ONLINE';
-                    broadcast({ type: 'status', status: serverStatus });
+    async install() {
+        return new Promise<boolean>((resolve) => {
+            const cmd = `curl -SsL https://playit-cloud.github.io/ppa/key.gpg | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/playit.gpg >/dev/null && \
+echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit-cloud.list && \
+sudo apt update && sudo apt install -y playit`;
+            
+            this.logs.push('--- Installing PlayIt ---');
+            exec(cmd, (err, stdout, stderr) => {
+                if (err) {
+                    this.logs.push(`Install Failed: ${stderr}`);
+                    resolve(false);
+                } else {
+                    this.logs.push('Install Success');
+                    this._isInstalled = true;
+                    resolve(true);
                 }
             });
         });
     }
 
-    if (bedrockProcess.stderr) {
-        bedrockProcess.stderr.setEncoding('utf8');
-        bedrockProcess.stderr.on('data', (chunk) => {
-            stderrBuffer.process(chunk.toString(), (line) => {
-                sendToConsole(line, 'stderr');
+    start() {
+        if (this.process) return false;
+        
+        let execPath = 'playit';
+        if (existsSync(path.resolve(PLAYIT_BIN))) execPath = path.resolve(PLAYIT_BIN);
+
+        try {
+            // Run inside SERVER_DIR so it can find/save playit.toml there if needed
+            this.process = spawn(execPath, [], {
+                cwd: SERVER_DIR,
+                stdio: ['ignore', 'pipe', 'pipe']
             });
-        });
+
+            const handleLog = (line: string) => {
+                this.logs.push(line);
+                if (this.logs.length > 200) this.logs.shift();
+                
+                // Parse address (e.g., "tunnel-address.playit.gg:1234")
+                const match = line.match(/((?:[a-z0-9-]+\.)+playit\.gg(?::\d+)?)/i);
+                if (match) this.publicAddress = match[1];
+            };
+
+            this.process.stdout?.on('data', c => this.buffer.process(c.toString(), handleLog));
+            this.process.stderr?.on('data', c => this.buffer.process(c.toString(), handleLog));
+
+            this.process.on('close', () => {
+                this.process = null;
+                this.publicAddress = null;
+                this.logs.push('--- PlayIt Stopped ---');
+            });
+            return true;
+        } catch (e: any) {
+            this.logs.push(`Start failed: ${e.message}`);
+            return false;
+        }
     }
 
-    bedrockProcess.on('error', (err) => {
-        sendToConsole(`Failed to spawn process: ${err.message}`, 'stderr');
-        serverStatus = 'OFFLINE';
-        broadcast({ type: 'status', status: serverStatus });
-        bedrockProcess = null;
-    });
-
-    bedrockProcess.on('close', (code) => {
-        sendToConsole(`Server process exited with code ${code}`, 'system');
-        bedrockProcess = null;
-        serverStatus = 'OFFLINE';
-        broadcast({ type: 'status', status: serverStatus });
-    });
-
-    return true;
-  } catch (error: any) {
-    sendToConsole(`Failed to start server: ${error.message}`, 'stderr');
-    return false;
-  }
-};
-
-const stopServer = () => {
-  if (!bedrockProcess) return false;
-  
-  serverStatus = 'STOPPING';
-  broadcast({ type: 'status', status: serverStatus });
-  sendToConsole('Stopping server...', 'system');
-  
-  if (bedrockProcess.stdin) {
-    bedrockProcess.stdin.write('stop\n');
-  } else {
-    bedrockProcess.kill('SIGTERM');
-  }
-  return true;
-};
-
-const restartServer = async () => {
-  if (bedrockProcess) {
-    stopServer();
-    let checks = 0;
-    while(bedrockProcess && checks < 20) {
-        await new Promise(r => setTimeout(r, 1000));
-        checks++;
+    stop() {
+        if (this.process) {
+            this.process.kill();
+            this.process = null;
+            return true;
+        }
+        return false;
     }
-  }
-  return startServer();
-};
 
-// --- WebSocket ---
-wss.on('connection', (ws) => {
-  ws.send(JSON.stringify({ type: 'status', status: serverStatus }));
-  ws.on('message', (message) => {
-    try {
-      const parsed = JSON.parse(message.toString());
-      if (parsed.command === 'input' && bedrockProcess && bedrockProcess.stdin) {
-        const cmd = parsed.value.trim();
-        bedrockProcess.stdin.write(cmd + '\n');
-        sendToConsole(`> ${cmd}`, 'stdout'); // Echo to console
-      }
-    } catch (e) {
-      console.error('WS Message Error', e);
+    getStatus() {
+        return {
+            running: !!this.process,
+            publicAddress: this.publicAddress,
+            logs: this.logs,
+            isInstalled: this._isInstalled
+        };
     }
-  });
-});
+}
+const playitService = new PlayItService();
 
-// --- HTTP Routes ---
+// ==========================================
+// SERVICE: WORLDS & BACKUPS
+// ==========================================
+class WorldService {
+    async listWorlds() {
+        if (!existsSync(WORLDS_DIR)) return [];
+        
+        // Get active level name
+        let activeLevelName = 'Bedrock level';
+        try {
+            const props = await fs.readFile(path.join(SERVER_DIR, 'server.properties'), 'utf-8');
+            const match = props.match(/^level-name=(.+)$/m);
+            if (match) activeLevelName = match[1].trim();
+        } catch {}
 
-app.post('/api/server/start', async (req, res) => {
-  const success = await startServer();
-  res.json({ success, message: success ? 'Server starting...' : 'Failed to start or already running' });
-});
-
-app.post('/api/server/stop', (req, res) => {
-  const success = stopServer();
-  res.json({ success, message: success ? 'Stop command sent' : 'Server not running' });
-});
-
-app.post('/api/server/restart', async (req, res) => {
-  const success = await restartServer();
-  res.json({ success, message: 'Restart sequence initiated' });
-});
-
-app.get('/api/server/status', (req, res) => {
-  res.json({ status: serverStatus });
-});
-
-// -- PlayIt Routes --
-app.get('/api/playit/status', (req, res) => {
-  res.json(playitService.getStatus());
-});
-
-app.post('/api/playit/start', (req, res) => {
-  const success = playitService.start();
-  res.json({ success, message: success ? 'PlayIt started' : 'Failed start or already running' });
-});
-
-app.post('/api/playit/stop', (req, res) => {
-  const success = playitService.stop();
-  res.json({ success, message: 'PlayIt stopped' });
-});
-
-
-// -- Config --
-app.get('/api/config/server', async (req, res) => {
-  try {
-    const propPath = path.join(SERVER_DIR, 'server.properties');
-    if (!existsSync(propPath)) return res.json([]);
-    
-    const content = await fs.readFile(propPath, 'utf-8');
-    const lines = content.split('\n');
-    const config = lines
-      .filter(line => line.trim() && !line.startsWith('#'))
-      .map(line => {
-        const [key, ...valParts] = line.split('=');
-        return { key: key.trim(), value: valParts.join('=').trim() };
-      });
-    res.json(config);
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to read config' });
-  }
-});
-
-app.put('/api/config/server', async (req, res) => {
-  try {
-    const newConfig = req.body;
-    const propPath = path.join(SERVER_DIR, 'server.properties');
-    let output = '#Properties Configured via Web Panel\n';
-    newConfig.forEach((item: any) => {
-      output += `${item.key}=${item.value}\n`;
-    });
-    await fs.writeFile(propPath, output);
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to save config' });
-  }
-});
-
-// -- Addons --
-const upload = multer({ dest: 'temp_uploads/' });
-
-app.get('/api/addons', async (req, res) => {
-  try {
-    const dirs = ['development_behavior_packs', 'development_resource_packs'];
-    const addons: any[] = [];
-
-    for (const dirName of dirs) {
-      const fullDir = path.join(SERVER_DIR, dirName);
-      if (existsSync(fullDir)) {
-        const entries = await fs.readdir(fullDir, { withFileTypes: true });
+        const entries = await fs.readdir(WORLDS_DIR, { withFileTypes: true });
+        const worlds = [];
         for (const entry of entries) {
             if (entry.isDirectory()) {
-                let manifest: any = null;
-                try {
-                    const manifestPath = path.join(fullDir, entry.name, 'manifest.json');
-                    if (existsSync(manifestPath)) {
-                        const raw = await fs.readFile(manifestPath, 'utf-8');
-                        const cleanRaw = raw.replace(/^\uFEFF/, '').replace(/\/\/.*$/gm, ''); 
-                        manifest = JSON.parse(cleanRaw);
-                    }
-                } catch (e) {}
-
-                addons.push({
+                const stats = await fs.stat(path.join(WORLDS_DIR, entry.name));
+                // Calc size loosely
+                worlds.push({
                     id: entry.name,
-                    name: manifest?.header?.name || entry.name,
-                    description: manifest?.header?.description || '',
-                    type: dirName.includes('behavior') ? 'behavior' : 'resource',
-                    path: dirName
+                    name: entry.name,
+                    isActive: entry.name === activeLevelName,
+                    lastModified: stats.mtime.toISOString(),
+                    sizeBytes: stats.size // Note: Folder size in node is just the dir entry, recursive calc is heavy, skipping for speed
                 });
             }
         }
-      }
+        return worlds;
     }
-    res.json(addons);
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to list addons' });
-  }
+
+    async createWorld(name: string, seed: string, gamemode: string, difficulty: string) {
+        // Safe folder name
+        const folderName = name.replace(/[^a-zA-Z0-9_-]/g, '');
+        const worldPath = path.join(WORLDS_DIR, folderName);
+        
+        // Bedrock creates the folder on start if level-name is set, 
+        // but we can create config logic ahead of time.
+        // To force generation, we just set it as active and restart.
+        
+        await this.setActive(folderName);
+        
+        // Also update properties for generation
+        const propsPath = path.join(SERVER_DIR, 'server.properties');
+        let content = await fs.readFile(propsPath, 'utf-8');
+        content = content.replace(/^level-seed=.*$/m, `level-seed=${seed}`);
+        content = content.replace(/^gamemode=.*$/m, `gamemode=${gamemode}`);
+        content = content.replace(/^difficulty=.*$/m, `difficulty=${difficulty}`);
+        await fs.writeFile(propsPath, content);
+
+        return true;
+    }
+
+    async importWorld(filePath: string, originalName: string) {
+        const zip = new AdmZip(filePath);
+        const entries = zip.getEntries();
+        
+        // Try to find level.dat to validate
+        const levelDat = entries.find(e => e.entryName.endsWith('level.dat'));
+        if (!levelDat) throw new Error('Invalid World: level.dat not found');
+
+        // Determine destination name
+        let folderName = originalName.replace(/\.(zip|mcworld)$/i, '').replace(/[^a-zA-Z0-9_-]/g, '');
+        if (!folderName) folderName = 'ImportedWorld';
+        
+        // Check if level.dat is inside a folder or at root
+        // If levelDat.entryName includes a slash, it's likely in a subfolder.
+        const pathParts = levelDat.entryName.split('/');
+        const isNested = pathParts.length > 1;
+        
+        const targetDir = path.join(WORLDS_DIR, folderName);
+        
+        if (existsSync(targetDir)) {
+             // Simple duplicate handling
+             folderName = `${folderName}_${Date.now()}`;
+        }
+
+        if (isNested) {
+            // The world is inside a folder in the zip, extract that folder's content to target
+            // We assume the top level folder is the world folder
+            const rootInZip = pathParts[0];
+            zip.extractEntryTo(rootInZip + "/", WORLDS_DIR, false, true); 
+            // AdmZip extraction with directories can be tricky. 
+            // Safer: Extract all to temp, then move.
+            
+            const tempExtract = path.join(SERVER_DIR, 'temp_import_' + Date.now());
+            zip.extractAllTo(tempExtract, true);
+            
+            // Move the inner folder to WORLDS_DIR/folderName
+            const innerPath = path.join(tempExtract, rootInZip);
+            if (existsSync(innerPath)) {
+                await fs.rename(innerPath, path.join(WORLDS_DIR, folderName));
+            }
+            await fs.rm(tempExtract, { recursive: true, force: true });
+
+        } else {
+            // Flat zip, extract directly to new folder
+            zip.extractAllTo(path.join(WORLDS_DIR, folderName), true);
+        }
+
+        return true;
+    }
+
+    async setActive(id: string) {
+        const propsPath = path.join(SERVER_DIR, 'server.properties');
+        let content = await fs.readFile(propsPath, 'utf-8');
+        // Regex replace level-name
+        if (content.match(/^level-name=/m)) {
+            content = content.replace(/^level-name=.*$/m, `level-name=${id}`);
+        } else {
+            content += `\nlevel-name=${id}`;
+        }
+        await fs.writeFile(propsPath, content);
+        return true;
+    }
+
+    async deleteWorld(id: string) {
+        const target = path.join(WORLDS_DIR, id);
+        if (existsSync(target)) {
+            await fs.rm(target, { recursive: true, force: true });
+            return true;
+        }
+        return false;
+    }
+
+    async backupWorld(id: string) {
+        const worldPath = path.join(WORLDS_DIR, id);
+        if (!existsSync(worldPath)) throw new Error('World not found');
+
+        const backupFolder = path.join(BACKUPS_DIR, id);
+        await fs.mkdir(backupFolder, { recursive: true });
+        
+        const filename = `${id}_${new Date().toISOString().replace(/[:.]/g, '-')}.zip`;
+        const zip = new AdmZip();
+        zip.addLocalFolder(worldPath);
+        await zip.writeZipPromise(path.join(backupFolder, filename));
+        return true;
+    }
+
+    async listBackups(id: string) {
+        const backupFolder = path.join(BACKUPS_DIR, id);
+        if (!existsSync(backupFolder)) return [];
+        const files = await fs.readdir(backupFolder);
+        const backups = [];
+        for (const f of files) {
+            if (f.endsWith('.zip')) {
+                const stats = await fs.stat(path.join(backupFolder, f));
+                backups.push({
+                    filename: f,
+                    date: stats.mtime.toISOString(),
+                    sizeBytes: stats.size
+                });
+            }
+        }
+        return backups;
+    }
+
+    // World Specific Addon Management
+    async getWorldAddons(worldId: string) {
+        const worldPath = path.join(WORLDS_DIR, worldId);
+        
+        // Helper to read world json
+        const readWorldJson = async (filename: string) => {
+            const p = path.join(worldPath, filename);
+            if (!existsSync(p)) return [];
+            try {
+                return JSON.parse(await fs.readFile(p, 'utf-8'));
+            } catch { return []; }
+        };
+
+        const wBehavior = await readWorldJson('world_behavior_packs.json');
+        const wResource = await readWorldJson('world_resource_packs.json');
+
+        // Get all installed addons to match names
+        const installed = await listInstalledAddons();
+
+        // Merge logic
+        const result = [];
+        for (const addon of installed) {
+            let enabled = false;
+            if (addon.type === 'behavior') {
+                enabled = wBehavior.some((x: any) => x.pack_id === addon.uuid);
+            } else {
+                enabled = wResource.some((x: any) => x.pack_id === addon.uuid);
+            }
+            result.push({ ...addon, enabled, folderName: addon.id });
+        }
+        return result;
+    }
+
+    async toggleWorldAddon(worldId: string, addonId: string, enabled: boolean) {
+        const installed = await listInstalledAddons();
+        const addon = installed.find(x => x.id === addonId);
+        if (!addon) throw new Error('Addon not installed');
+
+        const worldPath = path.join(WORLDS_DIR, worldId);
+        if (!existsSync(worldPath)) await fs.mkdir(worldPath, { recursive: true });
+
+        const fileName = addon.type === 'behavior' ? 'world_behavior_packs.json' : 'world_resource_packs.json';
+        const filePath = path.join(worldPath, fileName);
+
+        let current = [];
+        if (existsSync(filePath)) {
+            try { current = JSON.parse(await fs.readFile(filePath, 'utf-8')); } catch {}
+        }
+
+        if (enabled) {
+            // Add if not exists
+            if (!current.some((x: any) => x.pack_id === addon.uuid)) {
+                current.push({ pack_id: addon.uuid, version: addon.version });
+            }
+        } else {
+            // Remove
+            current = current.filter((x: any) => x.pack_id !== addon.uuid);
+        }
+
+        await fs.writeFile(filePath, JSON.stringify(current, null, 2));
+        return true;
+    }
+}
+const worldService = new WorldService();
+
+
+// ==========================================
+// HELPERS FOR ADDONS
+// ==========================================
+async function listInstalledAddons() {
+    const dirs = ['development_behavior_packs', 'development_resource_packs'];
+    const addons = [];
+    for (const d of dirs) {
+        const full = path.join(SERVER_DIR, d);
+        if (existsSync(full)) {
+            const entries = await fs.readdir(full, { withFileTypes: true });
+            for (const ent of entries) {
+                if (ent.isDirectory()) {
+                    let manifest: any = {};
+                    try {
+                        const mPath = path.join(full, ent.name, 'manifest.json');
+                        if (existsSync(mPath)) {
+                            const raw = await fs.readFile(mPath, 'utf-8');
+                            const clean = raw.replace(/\/\/.*$/gm, '').replace(/^\uFEFF/, '');
+                            manifest = JSON.parse(clean);
+                        }
+                    } catch {}
+                    
+                    addons.push({
+                        id: ent.name,
+                        name: manifest.header?.name || ent.name,
+                        description: manifest.header?.description,
+                        uuid: manifest.header?.uuid || '',
+                        version: manifest.header?.version || [1,0,0],
+                        type: d.includes('behavior') ? 'behavior' : 'resource',
+                        path: d
+                    });
+                }
+            }
+        }
+    }
+    return addons;
+}
+
+
+// ==========================================
+// HTTP ROUTES
+// ==========================================
+
+// -- Server Control --
+app.get('/api/server/status', (req, res) => res.json({ status: bedrockService.status }));
+app.post('/api/server/start', async (req, res) => {
+    const success = await bedrockService.start();
+    res.json({ success, message: success ? 'Starting' : 'Failed' });
+});
+app.post('/api/server/stop', (req, res) => {
+    const success = bedrockService.stop();
+    res.json({ success });
+});
+app.post('/api/server/restart', async (req, res) => {
+    const success = await bedrockService.restart();
+    res.json({ success });
 });
 
-app.post('/api/addons/upload', upload.single('file') as any, async (req: MulterRequest, res: any) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  
-  try {
-    const zip = new AdmZip(req.file.path);
-    const zipEntries = zip.getEntries();
-    
-    const manifestEntry = zipEntries.find(entry => entry.entryName.endsWith('manifest.json'));
-    if (!manifestEntry) throw new Error('Invalid addon: manifest.json not found');
-
-    const manifestData = manifestEntry.getData().toString('utf8');
-    const cleanJson = manifestData.replace(/\/\/.*$/gm, '').replace(/^\uFEFF/, ''); 
-    const manifest = JSON.parse(cleanJson);
-    
-    const isResource = manifest.modules?.some((m: any) => m.type === 'resources');
-    
-    // Forced use of development folders
-    const targetFolder = isResource ? 'development_resource_packs' : 'development_behavior_packs';
-    const packName = manifest.header.name.replace(/[^a-zA-Z0-9]/g, '_') || `addon_${Date.now()}`;
-    const extractPath = path.join(SERVER_DIR, targetFolder, packName);
-
-    zip.extractAllTo(extractPath, true);
-    await fs.unlink(req.file.path);
-
-    res.json({ success: true, message: `Installed to ${targetFolder}` });
-  } catch (error: any) {
-    console.error(error);
-    res.status(400).json({ error: error.message || 'Failed to process addon' });
-  }
+// -- Config --
+app.get('/api/config/server', async (req, res) => {
+    try {
+        const raw = await fs.readFile(path.join(SERVER_DIR, 'server.properties'), 'utf-8');
+        const config = raw.split('\n')
+            .filter(l => l.trim() && !l.startsWith('#'))
+            .map(l => {
+                const [k, ...v] = l.split('=');
+                return { key: k.trim(), value: v.join('=').trim() };
+            });
+        res.json(config);
+    } catch { res.json([]); }
 });
-
-app.delete('/api/addons/:type/:id', async (req, res) => {
-  try {
-    const { type, id } = req.params;
-    const folder = type === 'resource' ? 'development_resource_packs' : 'development_behavior_packs';
-    const targetPath = path.join(SERVER_DIR, folder, id);
-
-    if (existsSync(targetPath)) {
-        await fs.rm(targetPath, { recursive: true, force: true });
+app.put('/api/config/server', async (req, res) => {
+    try {
+        let out = '# Web Config\n';
+        req.body.forEach((i: any) => out += `${i.key}=${i.value}\n`);
+        await fs.writeFile(path.join(SERVER_DIR, 'server.properties'), out);
         res.json({ success: true });
-    } else {
-        res.status(404).json({ error: 'Addon not found' });
+    } catch { res.status(500).json({ error: 'Save failed' }); }
+});
+
+// -- Addons --
+app.get('/api/addons', async (req, res) => {
+    res.json(await listInstalledAddons());
+});
+const upload = multer({ dest: 'temp_uploads/' });
+app.post('/api/addons/upload', upload.single('file') as any, async (req: MulterRequest, res: any) => {
+    if (!req.file) return res.status(400).json({ error: 'No file' });
+    try {
+        const zip = new AdmZip(req.file.path);
+        const manifestEntry = zip.getEntries().find(e => e.entryName.endsWith('manifest.json'));
+        if (!manifestEntry) throw new Error('No manifest.json');
+        
+        const manifest = JSON.parse(manifestEntry.getData().toString('utf8').replace(/\/\/.*$/gm, ''));
+        const isResource = manifest.modules?.some((m: any) => m.type === 'resources');
+        const target = isResource ? 'development_resource_packs' : 'development_behavior_packs';
+        
+        const folderName = (manifest.header.name || 'addon').replace(/[^a-zA-Z0-9]/g, '_');
+        zip.extractAllTo(path.join(SERVER_DIR, target, folderName), true);
+        await fs.unlink(req.file.path);
+        res.json({ success: true, message: 'Installed' });
+    } catch (e: any) {
+        res.status(400).json({ error: e.message });
     }
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to delete addon' });
-  }
+});
+app.delete('/api/addons/:type/:id', async (req, res) => {
+    const folder = req.params.type === 'resource' ? 'development_resource_packs' : 'development_behavior_packs';
+    await fs.rm(path.join(SERVER_DIR, folder, req.params.id), { recursive: true, force: true });
+    res.json({ success: true });
+});
+
+// -- PlayIt --
+app.get('/api/playit/status', async (req, res) => {
+    await playitService.checkInstall();
+    res.json(playitService.getStatus());
+});
+app.post('/api/playit/start', (req, res) => res.json({ success: playitService.start() }));
+app.post('/api/playit/stop', (req, res) => res.json({ success: playitService.stop() }));
+app.post('/api/playit/install', async (req, res) => res.json({ success: await playitService.install() }));
+
+// -- Worlds --
+app.get('/api/worlds', async (req, res) => res.json(await worldService.listWorlds()));
+app.post('/api/worlds', async (req, res) => {
+    try {
+        const { name, seed, gamemode, difficulty } = req.body;
+        await worldService.createWorld(name, seed, gamemode, difficulty);
+        res.json({ success: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/worlds/import', upload.single('file') as any, async (req: MulterRequest, res: any) => {
+    if (!req.file) return res.status(400).json({ error: 'No file' });
+    try {
+        await worldService.importWorld(req.file.path, req.file.originalname);
+        await fs.unlink(req.file.path);
+        res.json({ success: true });
+    } catch (e: any) {
+        if (existsSync(req.file.path)) await fs.unlink(req.file.path);
+        res.status(500).json({ error: e.message });
+    }
+});
+app.post('/api/worlds/:id/activate', async (req, res) => {
+    await worldService.setActive(req.params.id);
+    res.json({ success: true });
+});
+app.delete('/api/worlds/:id', async (req, res) => {
+    res.json({ success: await worldService.deleteWorld(req.params.id) });
+});
+app.get('/api/worlds/:id/addons', async (req, res) => {
+    res.json(await worldService.getWorldAddons(req.params.id));
+});
+app.post('/api/worlds/:id/addons', async (req, res) => {
+    const { addonId, enabled } = req.body;
+    await worldService.toggleWorldAddon(req.params.id, addonId, enabled);
+    res.json({ success: true });
+});
+app.get('/api/worlds/:id/backups', async (req, res) => {
+    res.json(await worldService.listBackups(req.params.id));
+});
+app.post('/api/worlds/:id/backups', async (req, res) => {
+    await worldService.backupWorld(req.params.id);
+    res.json({ success: true });
+});
+
+
+// -- Websocket for Bedrock Console --
+wss.on('connection', ws => {
+    ws.send(JSON.stringify({ type: 'status', status: bedrockService.status }));
+    ws.on('message', m => {
+        try {
+            const p = JSON.parse(m.toString());
+            if (p.command === 'input') bedrockService.sendCommand(p.value);
+        } catch {}
+    });
 });
 
 server.listen(PORT, () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
-  console.log(`Server Directory: ${SERVER_DIR}`);
+    console.log(`Backend: http://localhost:${PORT}`);
+    console.log(`Server Dir: ${SERVER_DIR}`);
 });

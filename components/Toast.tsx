@@ -19,9 +19,7 @@ const ToastContainer: React.FC<ToastProps> = ({ toasts, removeToast }) => {
 
 const ToastItem: React.FC<{ toast: ToastData; onRemove: () => void }> = ({ toast, onRemove }) => {
   useEffect(() => {
-    const timer = setTimeout(() => {
-      onRemove();
-    }, 4000);
+    const timer = setTimeout(() => { onRemove(); }, 4000);
     return () => clearTimeout(timer);
   }, [onRemove]);
 
@@ -41,13 +39,11 @@ const ToastItem: React.FC<{ toast: ToastData; onRemove: () => void }> = ({ toast
     <div className={`${bgColors[toast.type]} p-4 rounded shadow-lg flex items-start space-x-3 min-w-[300px] pointer-events-auto transform transition-all duration-300 animate-slide-in`}>
       <div className="mt-0.5">{icons[toast.type]}</div>
       <div className="flex-1">
-        <p className="text-sm font-medium text-gray-100">{toast.message}</p>
+        <p className="text-sm font-bold text-gray-100">{toast.title}</p>
+        {toast.message && <p className="text-xs text-gray-400 mt-1">{toast.message}</p>}
       </div>
-      <button onClick={onRemove} className="text-gray-500 hover:text-white transition-colors">
-        <X size={16} />
-      </button>
+      <button onClick={onRemove} className="text-gray-500 hover:text-white transition-colors"><X size={16} /></button>
     </div>
   );
 };
-
 export default ToastContainer;

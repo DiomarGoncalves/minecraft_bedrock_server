@@ -1,13 +1,16 @@
 {
   "name": "bedrock-manager",
-  "version": "1.1.0",
-  "description": "Minecraft Bedrock Server Manager with PlayIt Tunneling",
+  "version": "1.2.0",
+  "description": "Minecraft Bedrock Server Manager",
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"npm run server\" \"npm run client\"",
-    "client": "vite",
-    "server": "ts-node --esm server.ts",
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.app.json && vite build",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "ts-node --esm server.ts",
+    "dev:client": "vite",
+    "build": "npm run build:server && npm run build:client",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build:client": "tsc -p tsconfig.app.json && vite build",
+    "start": "node dist/server.js",
     "preview": "vite preview"
   },
   "dependencies": {

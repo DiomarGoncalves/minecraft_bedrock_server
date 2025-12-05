@@ -23,7 +23,7 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws/console' });
 
 app.use(cors() as any);
-app.use(express.json());
+app.use(express.json() as any);
 
 // --- Types & Interfaces ---
 interface MulterRequest extends express.Request {
@@ -38,7 +38,7 @@ class LineBuffer {
     const lines = this.buffer.split('\n');
     this.buffer = lines.pop() || '';
     for (const line of lines) {
-      if (line.trim()) callback(line); // Changed: allow empty lines if strict needed, but trim is usually safer for UI
+      if (line.trim()) callback(line);
     }
   }
 }
@@ -267,7 +267,6 @@ class WorldService {
     async listWorlds() {
         if (!existsSync(WORLDS_DIR)) return [];
         
-        // Get active level name
         let activeLevelName = 'Bedrock level';
         try {
             const props = await fs.readFile(path.join(SERVER_DIR, 'server.properties'), 'utf-8');
@@ -280,13 +279,20 @@ class WorldService {
         for (const entry of entries) {
             if (entry.isDirectory()) {
                 const stats = await fs.stat(path.join(WORLDS_DIR, entry.name));
-                // Calc size loosely
+                // Get custom meta if exists
+                let meta: any = {};
+                try {
+                     const metaPath = path.join(WORLDS_DIR, entry.name, 'manager_config.json');
+                     if (existsSync(metaPath)) meta = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
+                } catch {}
+
                 worlds.push({
                     id: entry.name,
                     name: entry.name,
                     isActive: entry.name === activeLevelName,
                     lastModified: stats.mtime.toISOString(),
-                    sizeBytes: stats.size // Note: Folder size in node is just the dir entry, recursive calc is heavy, skipping for speed
+                    sizeBytes: stats.size,
+                    ...meta
                 });
             }
         }
@@ -294,17 +300,11 @@ class WorldService {
     }
 
     async createWorld(name: string, seed: string, gamemode: string, difficulty: string) {
-        // Safe folder name
         const folderName = name.replace(/[^a-zA-Z0-9_-]/g, '');
         const worldPath = path.join(WORLDS_DIR, folderName);
         
-        // Bedrock creates the folder on start if level-name is set, 
-        // but we can create config logic ahead of time.
-        // To force generation, we just set it as active and restart.
-        
         await this.setActive(folderName);
         
-        // Also update properties for generation
         const propsPath = path.join(SERVER_DIR, 'server.properties');
         let content = await fs.readFile(propsPath, 'utf-8');
         content = content.replace(/^level-seed=.*$/m, `level-seed=${seed}`);
@@ -318,57 +318,36 @@ class WorldService {
     async importWorld(filePath: string, originalName: string) {
         const zip = new AdmZip(filePath);
         const entries = zip.getEntries();
-        
-        // Try to find level.dat to validate
         const levelDat = entries.find(e => e.entryName.endsWith('level.dat'));
         if (!levelDat) throw new Error('Invalid World: level.dat not found');
 
-        // Determine destination name
         let folderName = originalName.replace(/\.(zip|mcworld)$/i, '').replace(/[^a-zA-Z0-9_-]/g, '');
         if (!folderName) folderName = 'ImportedWorld';
         
-        // Check if level.dat is inside a folder or at root
-        // If levelDat.entryName includes a slash, it's likely in a subfolder.
         const pathParts = levelDat.entryName.split('/');
         const isNested = pathParts.length > 1;
-        
         const targetDir = path.join(WORLDS_DIR, folderName);
         
-        if (existsSync(targetDir)) {
-             // Simple duplicate handling
-             folderName = `${folderName}_${Date.now()}`;
-        }
+        if (existsSync(targetDir)) folderName = `${folderName}_${Date.now()}`;
 
         if (isNested) {
-            // The world is inside a folder in the zip, extract that folder's content to target
-            // We assume the top level folder is the world folder
             const rootInZip = pathParts[0];
-            zip.extractEntryTo(rootInZip + "/", WORLDS_DIR, false, true); 
-            // AdmZip extraction with directories can be tricky. 
-            // Safer: Extract all to temp, then move.
-            
             const tempExtract = path.join(SERVER_DIR, 'temp_import_' + Date.now());
             zip.extractAllTo(tempExtract, true);
-            
-            // Move the inner folder to WORLDS_DIR/folderName
             const innerPath = path.join(tempExtract, rootInZip);
             if (existsSync(innerPath)) {
                 await fs.rename(innerPath, path.join(WORLDS_DIR, folderName));
             }
             await fs.rm(tempExtract, { recursive: true, force: true });
-
         } else {
-            // Flat zip, extract directly to new folder
             zip.extractAllTo(path.join(WORLDS_DIR, folderName), true);
         }
-
         return true;
     }
 
     async setActive(id: string) {
         const propsPath = path.join(SERVER_DIR, 'server.properties');
         let content = await fs.readFile(propsPath, 'utf-8');
-        // Regex replace level-name
         if (content.match(/^level-name=/m)) {
             content = content.replace(/^level-name=.*$/m, `level-name=${id}`);
         } else {
@@ -419,26 +398,19 @@ class WorldService {
         return backups;
     }
 
-    // World Specific Addon Management
     async getWorldAddons(worldId: string) {
         const worldPath = path.join(WORLDS_DIR, worldId);
         
-        // Helper to read world json
         const readWorldJson = async (filename: string) => {
             const p = path.join(worldPath, filename);
             if (!existsSync(p)) return [];
-            try {
-                return JSON.parse(await fs.readFile(p, 'utf-8'));
-            } catch { return []; }
+            try { return JSON.parse(await fs.readFile(p, 'utf-8')); } catch { return []; }
         };
 
         const wBehavior = await readWorldJson('world_behavior_packs.json');
         const wResource = await readWorldJson('world_resource_packs.json');
-
-        // Get all installed addons to match names
         const installed = await listInstalledAddons();
 
-        // Merge logic
         const result = [];
         for (const addon of installed) {
             let enabled = false;
@@ -460,26 +432,44 @@ class WorldService {
         const worldPath = path.join(WORLDS_DIR, worldId);
         if (!existsSync(worldPath)) await fs.mkdir(worldPath, { recursive: true });
 
+        // Distinguish file based on type
         const fileName = addon.type === 'behavior' ? 'world_behavior_packs.json' : 'world_resource_packs.json';
         const filePath = path.join(worldPath, fileName);
 
-        let current = [];
+        let current: any[] = [];
         if (existsSync(filePath)) {
-            try { current = JSON.parse(await fs.readFile(filePath, 'utf-8')); } catch {}
+            try { current = JSON.parse(await fs.readFile(filePath, 'utf-8')); } catch { current = []; }
         }
 
         if (enabled) {
-            // Add if not exists
-            if (!current.some((x: any) => x.pack_id === addon.uuid)) {
-                current.push({ pack_id: addon.uuid, version: addon.version });
+            // Strict Bedrock Format: { "pack_id": "uuid", "version": [x, y, z] }
+            // Remove any existing entry for this ID to update version if needed
+            current = current.filter((x: any) => x.pack_id !== addon.uuid);
+            
+            if (addon.uuid && addon.version) {
+                 current.push({ 
+                    pack_id: addon.uuid, 
+                    version: addon.version 
+                });
             }
         } else {
             // Remove
             current = current.filter((x: any) => x.pack_id !== addon.uuid);
         }
 
+        // Pretty print JSON for human readability
         await fs.writeFile(filePath, JSON.stringify(current, null, 2));
         return true;
+    }
+
+    async setGamerule(rule: string, value: string) {
+        // Since we can't edit level.dat easily without external libs,
+        // we use the running server console to inject gamerules.
+        if (bedrockService.status === 'ONLINE') {
+            bedrockService.sendCommand(`gamerule ${rule} ${value}`);
+            return true;
+        }
+        return false;
     }
 }
 const worldService = new WorldService();
@@ -507,15 +497,17 @@ async function listInstalledAddons() {
                         }
                     } catch {}
                     
-                    addons.push({
-                        id: ent.name,
-                        name: manifest.header?.name || ent.name,
-                        description: manifest.header?.description,
-                        uuid: manifest.header?.uuid || '',
-                        version: manifest.header?.version || [1,0,0],
-                        type: d.includes('behavior') ? 'behavior' : 'resource',
-                        path: d
-                    });
+                    if (manifest.header?.uuid) {
+                        addons.push({
+                            id: ent.name,
+                            name: manifest.header?.name || ent.name,
+                            description: manifest.header?.description,
+                            uuid: manifest.header?.uuid,
+                            version: manifest.header?.version || [1,0,0],
+                            type: d.includes('behavior') ? 'behavior' : 'resource',
+                            path: d
+                        });
+                    }
                 }
             }
         }
@@ -597,9 +589,6 @@ app.delete('/api/addons/:type/:id', async (req, res) => {
 
 // -- PlayIt --
 app.get('/api/playit/status', async (req, res) => {
-    // Only return current status, avoiding constant shell execution of checkInstall()
-    // checkInstall is done once on start or can be added as a separate forced check endpoint if needed.
-    // For now, rely on initial check + successful install update.
     res.json(playitService.getStatus());
 });
 app.post('/api/playit/start', (req, res) => res.json({ success: playitService.start() }));
@@ -647,6 +636,12 @@ app.get('/api/worlds/:id/backups', async (req, res) => {
 app.post('/api/worlds/:id/backups', async (req, res) => {
     await worldService.backupWorld(req.params.id);
     res.json({ success: true });
+});
+app.post('/api/worlds/:id/gamerule', async (req, res) => {
+    const { rule, value } = req.body;
+    const result = await worldService.setGamerule(rule, value);
+    if (result) res.json({ success: true });
+    else res.status(400).json({ error: 'Server must be online to edit gamerules (level.dat restriction)' });
 });
 
 

@@ -1,3 +1,4 @@
+
 import React, { useEffect, useState, useRef } from 'react';
 import { CloudLightning, Power, Copy, Terminal, ExternalLink, Download, Loader2 } from 'lucide-react';
 import { CommonProps, TunnelStatus } from '../types';
@@ -76,7 +77,7 @@ const TunnelManager: React.FC<CommonProps> = ({ showToast }) => {
                  </div>
                  <button onClick={handleInstall} disabled={installing} className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-lg font-bold flex items-center justify-center gap-2">
                     {installing ? <Loader2 className="animate-spin" size={18} /> : <Download size={18} />} 
-                    {installing ? 'Installing...' : 'Install via APT'}
+                    <span>{installing ? 'Installing...' : 'Install via APT'}</span>
                 </button>
              </div>
           ) : (
@@ -99,7 +100,8 @@ const TunnelManager: React.FC<CommonProps> = ({ showToast }) => {
                     disabled={loading}
                     className={`w-full py-3 rounded-lg font-bold flex items-center justify-center gap-2 text-white ${status.running ? 'bg-red-600 hover:bg-red-500' : 'bg-indigo-600 hover:bg-indigo-500'}`}
                 >
-                    <Power size={18} /> {status.running ? 'Stop Tunnel' : 'Start Tunnel'}
+                    <Power size={18} /> 
+                    <span>{status.running ? 'Stop Tunnel' : 'Start Tunnel'}</span>
                 </button>
             </div>
           )}

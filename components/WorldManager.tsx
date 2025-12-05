@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { Globe, Plus, Play, Trash2, Archive, Calendar, HardDrive, Settings, ArrowLeft, ToggleLeft, ToggleRight, Layers, FileDigit, Upload, Download } from 'lucide-react';
 import { CommonProps, World, WorldBackup, WorldAddonStatus } from '../types';
@@ -214,9 +215,9 @@ const WorldManager: React.FC<CommonProps> = ({ showToast }) => {
                           </div>
                           <div className="flex gap-4">
                                 {!selectedWorld.isActive && (
-                                    <button onClick={() => activateWorld(selectedWorld.id)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded flex items-center gap-2"><Play size={16} /> Activate</button>
+                                    <button onClick={() => activateWorld(selectedWorld.id)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded flex items-center gap-2"><Play size={16} /> <span>Activate</span></button>
                                 )}
-                                <button onClick={() => deleteWorld(selectedWorld.id)} className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded flex items-center gap-2"><Trash2 size={16} /> Delete</button>
+                                <button onClick={() => deleteWorld(selectedWorld.id)} className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded flex items-center gap-2"><Trash2 size={16} /> <span>Delete</span></button>
                           </div>
                       </div>
                   </div>
@@ -249,7 +250,7 @@ const WorldManager: React.FC<CommonProps> = ({ showToast }) => {
                   <div className="bg-gray-800 p-6 rounded-xl border border-gray-700">
                       <div className="flex justify-between mb-4">
                           <h3 className="text-lg font-bold text-white">Backups</h3>
-                          <button onClick={createBackup} className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded text-sm flex items-center gap-2"><Archive size={14} /> Create Backup</button>
+                          <button onClick={createBackup} className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded text-sm flex items-center gap-2"><Archive size={14} /> <span>Create Backup</span></button>
                       </div>
                       <div className="space-y-2">
                           {backups.map(b => (
@@ -281,10 +282,10 @@ const WorldManager: React.FC<CommonProps> = ({ showToast }) => {
           </div>
           <div className="flex gap-2">
             <button onClick={() => setView('import')} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 shadow-lg shadow-blue-900/20">
-                <Upload size={20} /> Import
+                <Upload size={20} /> <span>Import</span>
             </button>
             <button onClick={() => setView('create')} className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 shadow-lg shadow-emerald-900/20">
-                <Plus size={20} /> Create
+                <Plus size={20} /> <span>Create</span>
             </button>
           </div>
       </div>
@@ -303,7 +304,7 @@ const WorldManager: React.FC<CommonProps> = ({ showToast }) => {
                 
                 <div className="mt-6 flex gap-2">
                     <button onClick={() => openDetail(world)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2 rounded font-medium text-sm flex items-center justify-center gap-2">
-                        <Settings size={14} /> Manage
+                        <Settings size={14} /> <span>Manage</span>
                     </button>
                     {!world.isActive && (
                         <button onClick={() => activateWorld(world.id)} className="p-2 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-500 hover:text-white rounded transition-colors" title="Activate">

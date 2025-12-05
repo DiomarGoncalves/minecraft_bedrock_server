@@ -1,3 +1,4 @@
+
 import express from 'express';
 import type { RequestHandler } from 'express';
 import { createServer } from 'http';
@@ -21,7 +22,7 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws/console' });
 
-app.use(cors());
+app.use(cors() as any);
 app.use(express.json());
 
 // --- Types & Interfaces ---
@@ -596,7 +597,9 @@ app.delete('/api/addons/:type/:id', async (req, res) => {
 
 // -- PlayIt --
 app.get('/api/playit/status', async (req, res) => {
-    await playitService.checkInstall();
+    // Only return current status, avoiding constant shell execution of checkInstall()
+    // checkInstall is done once on start or can be added as a separate forced check endpoint if needed.
+    // For now, rely on initial check + successful install update.
     res.json(playitService.getStatus());
 });
 app.post('/api/playit/start', (req, res) => res.json({ success: playitService.start() }));

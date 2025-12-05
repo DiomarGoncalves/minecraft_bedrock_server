@@ -1,3 +1,4 @@
+
 export enum ServerStatus {
   OFFLINE = 'OFFLINE',
   STARTING = 'STARTING',
@@ -29,10 +30,12 @@ export interface AddonFile {
 
 export interface World {
   id: string; // Folder name
-  name: string; // Folder name (usually same as ID for simplicity)
+  name: string; // Folder name
   isActive: boolean;
   sizeBytes: number;
   lastModified: string;
+  description?: string;
+  experiments?: WorldExperiments;
 }
 
 export interface WorldBackup {
@@ -41,17 +44,24 @@ export interface WorldBackup {
   sizeBytes: number;
 }
 
-export interface WorldAddonStatus {
-  uuid: string;
-  name: string;
-  version: number[];
-  type: 'behavior' | 'resource';
-  enabled: boolean;
-  folderName: string; // To link back to installed addons
+// Representa o status de um addon DENTRO de um mundo específico
+export interface WorldAddonStatus extends AddonFile {
+  enabled: boolean; // Se está presente no world_behavior_packs.json
 }
 
 export interface WorldExperiments {
-  [key: string]: boolean;
+  gametest?: boolean;
+  experiments?: boolean; // General toggle
+  // Bedrock specific keys usually found in level.dat, but we store in meta for now
+  [key: string]: boolean | undefined;
+}
+
+export interface Gamerule {
+  key: string;
+  label: string;
+  desc: string;
+  value: boolean | number;
+  type: 'boolean' | 'number';
 }
 
 export type ToastType = 'success' | 'error' | 'info';

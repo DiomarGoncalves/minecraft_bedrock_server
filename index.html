@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bedrock Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Custom scrollbar for console */
+      .console-scroll::-webkit-scrollbar {
+        width: 8px;
+      }
+      .console-scroll::-webkit-scrollbar-track {
+        background: #1e1e1e;
+      }
+      .console-scroll::-webkit-scrollbar-thumb {
+        background: #555;
+        border-radius: 4px;
+      }
+      .console-scroll::-webkit-scrollbar-thumb:hover {
+        background: #777;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.555.0",
+    "cors": "https://aistudiocdn.com/cors@^2.8.5",
+    "path": "https://aistudiocdn.com/path@^0.12.7",
+    "express": "https://aistudiocdn.com/express@^5.2.1",
+    "vite": "https://aistudiocdn.com/vite@^7.2.6",
+    "react/": "https://aistudiocdn.com/react@^19.2.1/",
+    "react": "https://aistudiocdn.com/react@^19.2.1",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
+    "@vitejs/plugin-react": "https://aistudiocdn.com/@vitejs/plugin-react@^5.1.1",
+    "child_process": "https://aistudiocdn.com/child_process@^1.0.2",
+    "ws": "https://aistudiocdn.com/ws@^8.18.3",
+    "fs": "https://aistudiocdn.com/fs@^0.0.1-security",
+    "fs/": "https://aistudiocdn.com/fs@^0.0.1-security/",
+    "multer": "https://aistudiocdn.com/multer@^2.0.2",
+    "http": "https://aistudiocdn.com/http@^0.0.1-security",
+    "adm-zip": "https://aistudiocdn.com/adm-zip@^0.5.16"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-gray-900 text-gray-100 font-sans antialiased h-screen overflow-hidden">
+    <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>

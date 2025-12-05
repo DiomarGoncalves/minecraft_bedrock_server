@@ -43,6 +43,30 @@ class LineBuffer {
   }
 }
 
+// Robust JSON parser to handle "dirty" JSON from addons (comments, trailing commas, BOM)
+function parseJsonLoose(str: string) {
+    if (!str) return {};
+    try {
+        return JSON.parse(str);
+    } catch (e) {
+        try {
+            // 1. Remove BOM
+            let clean = str.replace(/^\uFEFF/, '');
+            // 2. Remove Comments (Block and Line)
+            clean = clean.replace(/\/\*[\s\S]*?\*\/|([^\\:]|^)\/\/.*$/gm, '$1');
+            // 3. Remove Trailing Commas
+            clean = clean.replace(/,(\s*[}\]])/g, '$1');
+            // 4. Remove generic control characters that might break JSON (e.g. 0x00-0x1F except \n \r \t)
+            // clean = clean.replace(/[\x00-\x09\x0B-\x1F\x7F]/g, ''); 
+            
+            return JSON.parse(clean);
+        } catch (e2) {
+            console.error("Failed to parse JSON loose:", e2);
+            return {}; // Return empty object instead of crashing or throwing
+        }
+    }
+}
+
 const broadcast = (data: any) => {
   const message = JSON.stringify(data);
   wss.clients.forEach((client) => {
@@ -280,7 +304,7 @@ class WorldService {
                 let meta: any = {};
                 try {
                      const metaPath = path.join(WORLDS_DIR, entry.name, 'manager_config.json');
-                     if (existsSync(metaPath)) meta = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
+                     if (existsSync(metaPath)) meta = parseJsonLoose(await fs.readFile(metaPath, 'utf-8'));
                 } catch {}
 
                 worlds.push({
@@ -403,7 +427,7 @@ class WorldService {
         const readWorldJson = async (filename: string) => {
             const p = path.join(worldPath, filename);
             if (!existsSync(p)) return [];
-            try { return JSON.parse(await fs.readFile(p, 'utf-8')); } catch { return []; }
+            try { return parseJsonLoose(await fs.readFile(p, 'utf-8')); } catch { return []; }
         };
 
         // Current world config
@@ -418,9 +442,9 @@ class WorldService {
             let enabled = false;
             // Check if addon UUID exists in the world's JSON
             if (addon.type === 'behavior') {
-                enabled = wBehavior.some((x: any) => x.pack_id === addon.uuid);
+                enabled = Array.isArray(wBehavior) && wBehavior.some((x: any) => x.pack_id === addon.uuid);
             } else {
-                enabled = wResource.some((x: any) => x.pack_id === addon.uuid);
+                enabled = Array.isArray(wResource) && wResource.some((x: any) => x.pack_id === addon.uuid);
             }
             result.push({ ...addon, enabled, folderName: addon.id });
         }
@@ -441,7 +465,10 @@ class WorldService {
 
         let current: any[] = [];
         if (existsSync(filePath)) {
-            try { current = JSON.parse(await fs.readFile(filePath, 'utf-8')); } catch { current = []; }
+            try { 
+                current = parseJsonLoose(await fs.readFile(filePath, 'utf-8')); 
+                if (!Array.isArray(current)) current = [];
+            } catch { current = []; }
         }
 
         // 2. Modify list
@@ -449,7 +476,7 @@ class WorldService {
         current = current.filter((x: any) => x.pack_id !== addon.uuid);
 
         if (enabled) {
-            // Add with Bedrock strict format
+            // Add with Bedrock strict format: uuid and array version
             current.push({ 
                 pack_id: addon.uuid, 
                 version: addon.version 
@@ -469,7 +496,7 @@ class WorldService {
         
         const metaPath = path.join(worldPath, 'manager_config.json');
         let meta: any = {};
-        try { if(existsSync(metaPath)) meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')); } catch {}
+        try { if(existsSync(metaPath)) meta = parseJsonLoose(await fs.readFile(metaPath, 'utf-8')); } catch {}
 
         meta.experiments = { ...(meta.experiments || {}), ...experiments };
         
@@ -505,9 +532,8 @@ async function listInstalledAddons() {
                         const mPath = path.join(full, ent.name, 'manifest.json');
                         if (existsSync(mPath)) {
                             const raw = await fs.readFile(mPath, 'utf-8');
-                            // Clean comments if JSONC
-                            const clean = raw.replace(/\/\/.*$/gm, '').replace(/^\uFEFF/, '');
-                            manifest = JSON.parse(clean);
+                            // Use robust parser
+                            manifest = parseJsonLoose(raw);
                         }
                     } catch {}
                     
@@ -570,17 +596,20 @@ app.post('/api/addons/upload', upload.single('file') as any, async (req: MulterR
         const manifestEntry = zip.getEntries().find(e => e.entryName.endsWith('manifest.json'));
         if (!manifestEntry) throw new Error('No manifest.json');
         
-        const manifest = JSON.parse(manifestEntry.getData().toString('utf8').replace(/\/\/.*$/gm, ''));
+        // Use robust parser for the uploaded manifest
+        const manifest = parseJsonLoose(manifestEntry.getData().toString('utf8'));
+        
         const isResource = manifest.modules?.some((m: any) => m.type === 'resources');
         const target = isResource ? 'development_resource_packs' : 'development_behavior_packs';
         
-        const folderName = (manifest.header.name || 'addon').replace(/[^a-zA-Z0-9]/g, '_');
+        const folderName = (manifest.header?.name || 'addon').replace(/[^a-zA-Z0-9]/g, '_');
         zip.extractAllTo(path.join(SERVER_DIR, target, folderName), true);
         await fs.unlink(req.file.path);
         res.json({ success: true, message: 'Installed' });
     } catch (e: any) {
         if(existsSync(req.file.path)) await fs.unlink(req.file.path);
-        res.status(400).json({ error: e.message });
+        console.error("Upload Error:", e);
+        res.status(400).json({ error: e.message || 'Invalid addon file' });
     }
 });
 app.delete('/api/addons/:type/:id', async (req, res) => {

@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
-import { Globe, Plus, Play, Trash2, Archive, Calendar, HardDrive, Settings, ArrowLeft, ToggleLeft, ToggleRight, Layers, FileDigit, Upload, Download, Search, CheckCircle, Package, FlaskConical, Gamepad2, Info, ChevronRight } from 'lucide-react';
-import { CommonProps, World, WorldBackup, WorldAddonStatus, WorldExperiments } from '../types';
+import { Globe, Plus, Play, Trash2, Archive, Calendar, HardDrive, Settings, ArrowLeft, ToggleLeft, ToggleRight, Layers, FileDigit, Upload, Download, Search, CheckCircle, Package, FlaskConical, Gamepad2, Info, ChevronRight, AlertTriangle } from 'lucide-react';
+import { CommonProps, World, WorldBackup, WorldAddonStatus, WorldExperiments, ServerStatus } from '../types';
 
 const WorldManager: React.FC<CommonProps> = ({ showToast }) => {
   const [worlds, setWorlds] = useState<World[]>([]);
@@ -138,7 +138,7 @@ const WorldDetailView: React.FC<{ world: World, showToast: any, onBack: () => vo
                         <div className="flex items-center gap-3 mt-1 text-sm text-gray-500 font-mono">
                             <span>{world.id}</span>
                             <span>•</span>
-                            <span>{(world.sizeBytes / 1024 / 1024).toFixed(2)} MB</span>
+                            <span><span>{(world.sizeBytes / 1024 / 1024).toFixed(2)} MB</span></span>
                         </div>
                     </div>
                 </div>
@@ -188,7 +188,7 @@ const WorldDetailView: React.FC<{ world: World, showToast: any, onBack: () => vo
                                     </div>
                                     <div className="flex justify-between border-b border-gray-700 pb-2">
                                         <span className="text-gray-400">Size</span>
-                                        <span className="text-white font-mono text-sm">{(world.sizeBytes / 1024).toFixed(1)} KB</span>
+                                        <span className="text-white font-mono text-sm"><span>{(world.sizeBytes / 1024).toFixed(1)} KB</span></span>
                                     </div>
                                     <div className="flex justify-between border-b border-gray-700 pb-2">
                                         <span className="text-gray-400">Last Modified</span>
@@ -268,7 +268,7 @@ const WorldAddonsTab: React.FC<{ worldId: string, showToast: any }> = ({ worldId
                                     <div>
                                         <h4 className="font-bold text-gray-200">{a.name}</h4>
                                         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500 font-mono mt-1">
-                                            <span className="bg-gray-900 px-1.5 rounded">v{a.version.join('.')}</span>
+                                            <span className="bg-gray-900 px-1.5 rounded">v{Array.isArray(a.version) ? a.version.join('.') : a.version}</span>
                                             <span>{a.uuid}</span>
                                         </div>
                                     </div>
@@ -367,6 +367,16 @@ const ExperimentsTab: React.FC<{ world: World, showToast: any, onRefresh: () => 
 
 // --- TAB: GAMERULES ---
 const GamerulesTab: React.FC<{ worldId: string, showToast: any }> = ({ worldId, showToast }) => {
+    const [online, setOnline] = useState(false);
+
+    useEffect(() => {
+        // Check server status to enable/disable controls
+        fetch('/api/server/status')
+            .then(res => res.json())
+            .then(data => setOnline(data.status === 'ONLINE'))
+            .catch(() => setOnline(false));
+    }, []);
+
     const rules = [
         { key: 'keepinventory', label: 'Keep Inventory', desc: 'Keep items after death' },
         { key: 'showcoordinates', label: 'Show Coordinates', desc: 'Display XYZ position' },
@@ -377,6 +387,10 @@ const GamerulesTab: React.FC<{ worldId: string, showToast: any }> = ({ worldId, 
     ];
 
     const setRule = async (rule: string, val: boolean) => {
+        if (!online) {
+            showToast('error', 'Server must be ONLINE to change gamerules.');
+            return;
+        }
         try {
             const res = await fetch(`/api/worlds/${worldId}/gamerule`, {
                 method: 'POST',
@@ -384,20 +398,25 @@ const GamerulesTab: React.FC<{ worldId: string, showToast: any }> = ({ worldId, 
                 body: JSON.stringify({ rule, value: val.toString() })
             });
             if (res.ok) showToast('success', `Set ${rule} to ${val}`);
-            else showToast('error', 'Server must be ONLINE to change rules');
+            else showToast('error', 'Command failed');
         } catch { showToast('error', 'Network error'); }
     };
 
     return (
         <div className="max-w-3xl mx-auto">
-             <div className="bg-blue-900/20 border border-blue-700/50 p-4 rounded-xl mb-6 flex gap-3">
-                <Settings className="text-blue-400 shrink-0" />
-                <div className="text-blue-200 text-sm">
+             <div className={`p-4 rounded-xl mb-6 flex gap-3 border ${online ? 'bg-blue-900/20 border-blue-700/50' : 'bg-red-900/20 border-red-700/50'}`}>
+                {online ? <Settings className="text-blue-400 shrink-0" /> : <AlertTriangle className="text-red-400 shrink-0" />}
+                <div className={`text-sm ${online ? 'text-blue-200' : 'text-red-200'}`}>
                     <p className="font-bold">Live Configuration</p>
-                    <p>Gamerules are injected via console commands. The server must be <strong>ONLINE</strong> and this world must be active.</p>
+                    {online ? (
+                        <p>Gamerules are injected via console commands. Changes apply immediately.</p>
+                    ) : (
+                        <p>Server is <strong>OFFLINE</strong>. Start the server to configure gamerules.</p>
+                    )}
                 </div>
              </div>
-             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+             
+             <div className={`grid grid-cols-1 md:grid-cols-2 gap-4 ${!online ? 'opacity-50 pointer-events-none' : ''}`}>
                  {rules.map(r => (
                      <div key={r.key} className="bg-gray-800 p-4 rounded-xl border border-gray-700 flex flex-col justify-between hover:bg-gray-750 transition-colors">
                          <div className="mb-4">
@@ -552,7 +571,7 @@ const ImportWorldModal: React.FC<{ onClose: () => void, onSuccess: () => void, s
                     <input type="file" className="hidden" accept=".zip,.mcworld" onChange={handleFile} disabled={uploading} />
                     <span className="text-gray-300 font-medium flex flex-col items-center gap-2">
                         {uploading ? (
-                            <span>Uploading & Extracting...</span>
+                            <span><span>Uploading & Extracting...</span></span>
                         ) : (
                             <>
                                 <Upload size={24} className="mb-2 text-gray-500"/>
